@@ -20,6 +20,7 @@ class FireResetEnv(gym.Wrapper):
         assert len(env.unwrapped.get_action_meanings()) >= 3
 
     def step(self, action):
+        self.env.render()
         return self.env.step(action)
 
     def reset(self):
