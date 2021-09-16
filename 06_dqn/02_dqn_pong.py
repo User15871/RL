@@ -12,6 +12,7 @@ import  argparse
 import  time
 import numpy as np
 import collections
+from save_gif import Gif
 
 import torch
 import torch.nn as nn
@@ -59,6 +60,7 @@ class  Agent :
     def __init__(self, env, exp_buffer):
         self.env = env
         self.exp_buffer = exp_buffer
+        self.gif = Gif(path = './pong/')
         self._reset()
 
     def _reset(self):
@@ -76,7 +78,7 @@ class  Agent :
             q_vals_v = net(state_v)
             _, act_v = torch.max(q_vals_v, dim=1)
             action = int(act_v.item())
-
+        self.gif.load_frame(self.env.render(mode="rgb_array"))
         # do step in the environment
         new_state, reward, is_done, _ = self.env.step(action)
         self.total_reward += reward
@@ -87,6 +89,7 @@ class  Agent :
         if is_done:
             done_reward = self.total_reward
             self._reset()
+            self.gif.save_gif()
         return done_reward
 
 
@@ -108,7 +111,7 @@ def calc_loss(batch, net, tgt_net, device="cpu"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cuda", default=False, action="store_true", help="Enable cuda")
+    parser.add_argument("--cuda", default=True, action="store_true", help="Enable cuda")
     parser.add_argument("--env", default=DEFAULT_ENV_NAME,
                         help="Name of the environment, default=" + DEFAULT_ENV_NAME)
     parser.add_argument("--reward", type=float, default=MEAN_REWARD_BOUND,
@@ -140,7 +143,6 @@ if __name__ == "__main__":
 
         reward = agent.play_step(net, epsilon, device=device)
         
-        
         if reward is not None:
             total_rewards.append(reward)
             speed = (frame_idx - ts_frame) / (time.time() - ts)
@@ -170,7 +172,7 @@ if __name__ == "__main__":
         if frame_idx % SYNC_TARGET_FRAMES == 0:
             tgt_net.load_state_dict(net.state_dict())
 
-        optimizer . zero_grad ()
+        optimizer. zero_grad ()
         batch = buffer.sample(BATCH_SIZE)
         loss_t = calc_loss(batch, net, tgt_net, device=device)
         loss_t.backward()

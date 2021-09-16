@@ -20,7 +20,6 @@ class FireResetEnv(gym.Wrapper):
         assert len(env.unwrapped.get_action_meanings()) >= 3
 
     def step(self, action):
-        self.env.render()
         return self.env.step(action)
 
     def reset(self):
@@ -90,7 +89,7 @@ class ImageToPyTorch(gym.ObservationWrapper):
         super(ImageToPyTorch, self).__init__(env)
         old_shape = self.observation_space.shape
         self.observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=(old_shape[-1], old_shape[0], old_shape[1]),
-                                                dtype = np.float32 )
+                                                dtype = np.float32)
 
     def observation(self, observation):
         return np.moveaxis(observation, 2, 0)
@@ -121,9 +120,9 @@ class BufferWrapper(gym.ObservationWrapper):
 
 def make_env(env_name):
     env = gym.make(env_name)
-    env  =  MaxAndSkipEnv ( env )
+    env = MaxAndSkipEnv (env)
     env = FireResetEnv(env)
     env = ProcessFrame84(env)
-    env  =  ImageToPyTorch ( env )
+    env = ImageToPyTorch (env)
     env = BufferWrapper(env, 4)
     return ScaledFloatFrame(env)
