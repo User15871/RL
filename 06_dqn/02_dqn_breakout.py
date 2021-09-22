@@ -21,15 +21,15 @@ import torch.optim as optim
 from tensorboardX import SummaryWriter
 
 
-DEFAULT_ENV_NAME = "Breakout-v0"
-MEAN_REWARD_BOUND = 19.5
+DEFAULT_ENV_NAME = "BreakoutNoFrameskip-v4"
+MEAN_REWARD_BOUND = 100
 
 GAMMA = 0.99
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 REPLAY_SIZE = 10000
-LEARNING_RATE = 2e-4
+LEARNING_RATE = 1e-4
 SYNC_TARGET_FRAMES = 1000
-REPLAY_START_SIZE = 1000
+REPLAY_START_SIZE = 100
 
 EPSILON_DECAY_LAST_FRAME = 10**5
 EPSILON_START = 1.0
@@ -61,11 +61,13 @@ class  Agent :
         self.env = env
         self.exp_buffer = exp_buffer
         self.gif = Gif(path = './breakout/')
+        self.total_reward = 0.0
         self._reset()
 
     def _reset(self):
+        if self.env.was_real_done:
+            self.total_reward = 0.0
         self.state = env.reset()
-        self.total_reward = 0.0
 
     def play_step(self, net, epsilon=0.0, device="cpu"):
         done_reward = None
@@ -82,14 +84,17 @@ class  Agent :
         # do step in the environment
         new_state, reward, is_done, _ = self.env.step(action)
         self.total_reward += reward
-
+        if is_done and (reward == 0):
+            reward = -1
+        
         exp = Experience(self.state, action, reward, is_done, new_state)
         self.exp_buffer.append(exp)
         self.state = new_state
         if is_done:
-            done_reward = self.total_reward
+            if self.env.was_real_done:
+                done_reward = self.total_reward
+                self.gif.save_gif()
             self._reset()
-            self.gif.save_gif()
         return done_reward
 
 
@@ -114,7 +119,7 @@ def calc_loss(batch, net, tgt_net, device="cpu", double=True):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cuda", default=False, action="store_true", help="Enable cuda")
+    parser.add_argument("--cuda", default=True, action="store_true", help="Enable cuda")
     parser.add_argument("--env", default=DEFAULT_ENV_NAME,
                         help="Name of the environment, default=" + DEFAULT_ENV_NAME)
     parser.add_argument("--reward", type=float, default=MEAN_REWARD_BOUND,
@@ -175,7 +180,7 @@ if __name__ == "__main__":
         if frame_idx % SYNC_TARGET_FRAMES == 0:
             tgt_net.load_state_dict(net.state_dict())
 
-        optimizer.zero_grad()
+        optimizer.zero_grad ()
         batch = buffer.sample(BATCH_SIZE)
         loss_t = calc_loss(batch, net, tgt_net, device=device)
         loss_t.backward()
