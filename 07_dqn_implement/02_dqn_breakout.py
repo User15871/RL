@@ -22,27 +22,29 @@ from tensorboardX import SummaryWriter
 
 
 DEFAULT_ENV_NAME = "BreakoutNoFrameskip-v4"
-MEAN_REWARD_BOUND = 19.5
+MEAN_REWARD_BOUND = 100
 
 GAMMA = 0.99
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 REPLAY_SIZE = 10000
-LEARNING_RATE = 2e-4
+LEARNING_RATE = 1e-4
 SYNC_TARGET_FRAMES = 1000
-REPLAY_START_SIZE = 1000
+REPLAY_START_SIZE = 100
 
-
+EPSILON_START = 1.0
+EPSILON_DECAY = 0.01
 STEP_COUNT = 2
 
 
 Experience = collections.namedtuple('Experience', field_names=['state', 'action', 'reward', 'done', 'new_state'])
 
 
-
-
 class ExperienceBuffer:
-    def __init__(self, capacity):
+    def __init__(self, capacity, prob_alpha=0.6):
         self.buffer = collections.deque(maxlen=capacity)
+        self.priorities = collections.deque(maxlen=capacity)
+        self.max_prio = 1.0
+        self.prob_alpha = prob_alpha
 
     def __len__(self):
         return len(self.buffer)
@@ -55,16 +57,29 @@ class ExperienceBuffer:
     
     def append(self, experience):
         self.buffer.append(experience)
+        self.priorities.append(self.max_prio)
 
     def sample(self, batch_size):
-        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
+        probs = np.array(self.priorities, dtype=np.float32) ** self.prob_alpha
+        probs /= probs.sum()
+        
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs, replace=True)
         states, actions, rewards, dones, next_states = zip(*[self.buffer[idx] for idx in indices])
         return np.array(states), np.array(actions), np.array(rewards, dtype=np.float32), \
-               np.array(dones, dtype=np.uint8), np.array(next_states)
-
+               np.array(dones, dtype=np.uint8), np.array(next_states), indices
+               
+    def update_priorities(self, batch_indices, batch_priorities):
+        for idx, prio in zip(batch_indices, batch_priorities):
+            self.priorities[idx] = prio
+        self.max_prio = batch_priorities.max()
+    
+    def clear(self):
+        self.buffer.clear()
+        
 
 class  Agent :
     def __init__(self, env, exp_buffer, steps_count = 1, gamma = 0.99):
+        
         self.env = env
         self.gamma = gamma
         self.hist_buffer = ExperienceBuffer(steps_count)
@@ -73,9 +88,12 @@ class  Agent :
         self._reset()
 
     def _reset(self):
+        if self.env.was_real_done:
+            self.total_reward = 0.0
         self.state = env.reset()
-        self.total_reward = 0.0
+        self.hist_buffer.clear()
 
+    
     def play_step(self, net, epsilon=0.0, device="cpu"):
         done_reward = None
 
@@ -87,11 +105,14 @@ class  Agent :
             q_vals_v = net(state_v)
             _, act_v = torch.max(q_vals_v, dim=1)
             action = int(act_v.item())
+        
         self.gif.load_frame(self.env.render(mode="rgb_array"))
         # do step in the environment
         new_state, reward, is_done, _ = self.env.step(action)
         self.total_reward += reward
-
+        if is_done and (reward == 0):
+            reward = -1
+            
         exp = Experience(self.state, action, reward, is_done, new_state)
         self.hist_buffer.append(exp)
         self.state = new_state
@@ -104,14 +125,14 @@ class  Agent :
         self.exp_buffer.append(Experience(self.hist_buffer[0].state, self.hist_buffer[0].action, hist_reward, self.hist_buffer[-1].done, self.hist_buffer[-1].new_state))
             
         if is_done:
-            done_reward = self.total_reward
+            if self.env.was_real_done:
+                done_reward = self.total_reward
+                self.gif.save_gif()
             self._reset()
-            self.gif.save_gif()
         return done_reward
 
 
-def calc_loss(batch, net, tgt_net, device="cpu", double=True):
-    states, actions, rewards, dones, next_states = batch
+def calc_loss(states, actions, rewards, dones, next_states, net, tgt_net, device="cpu", double=True):
     states_v = torch.tensor(states).to(device)
     next_states_v = torch.tensor(next_states).to(device)
     actions_v = torch.tensor(actions).to(device)
@@ -126,12 +147,14 @@ def calc_loss(batch, net, tgt_net, device="cpu", double=True):
     next_state_values[done_mask] = 0.0
 
     expected_state_action_values = next_state_values.detach() * (GAMMA ** STEP_COUNT) + rewards_v
-    return nn.MSELoss()(state_action_values, expected_state_action_values)
+    losses_v = (state_action_values - expected_state_action_values) ** 2
+    
+    return losses_v.mean(), (losses_v + 1e-5).data.cpu().numpy()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cuda", default=False, action="store_true", help="Enable cuda")
+    parser.add_argument("--cuda", default=True, action="store_true", help="Enable cuda")
     parser.add_argument("--env", default=DEFAULT_ENV_NAME,
                         help="Name of the environment, default=" + DEFAULT_ENV_NAME)
     parser.add_argument("--reward", type=float, default=MEAN_REWARD_BOUND,
@@ -148,6 +171,7 @@ if __name__ == "__main__":
 
     buffer = ExperienceBuffer(REPLAY_SIZE)
     agent = Agent(env, buffer, STEP_COUNT)
+    epsilon = EPSILON_START
 
     optimizer = optim.Adam(net.parameters(), lr=LEARNING_RATE)
     total_rewards = []
@@ -158,18 +182,24 @@ if __name__ == "__main__":
 
     while True:
         frame_idx += 1
-        reward = agent.play_step(net, device=device)
+        if epsilon > 0:
+            epsilon -= EPSILON_DECAY
+        reward = agent.play_step(net, epsilon, device=device)
         
         if reward is not None:
             total_rewards.append(reward)
             speed = (frame_idx - ts_frame) / (time.time() - ts)
+            mean_reward = np.mean(total_rewards[-100:])
+            if reward == mean_reward:
+                epsilon += (frame_idx - ts_frame) * EPSILON_DECAY
             ts_frame = frame_idx
             ts = time.time()
-            mean_reward = np.mean(total_rewards[-100:])
-            print("%d: done %d games, mean reward %.3f, speed %.2f f/s" % (
-                frame_idx, len(total_rewards), mean_reward,
-                speed
+            
+            print("%d: done %d games, mean reward %.3f, reward %.3f, eps %.2f, speed %.2f f/s, max_loss %.2f" % (
+                frame_idx, len(total_rewards), mean_reward, reward, epsilon,
+                speed, buffer.max_prio
             ))
+            
             writer.add_scalar("speed", speed, frame_idx)
             writer.add_scalar("reward_100", mean_reward, frame_idx)
             writer.add_scalar("reward", reward, frame_idx)
@@ -189,8 +219,9 @@ if __name__ == "__main__":
             tgt_net.load_state_dict(net.state_dict())
 
         optimizer.zero_grad()
-        batch = buffer.sample(BATCH_SIZE)
-        loss_t = calc_loss(batch, net, tgt_net, device=device)
+        states, actions, rewards, dones, next_states, batch_indices  = buffer.sample(BATCH_SIZE)
+        loss_t, sample_prios = calc_loss(states, actions, rewards, dones, next_states, net, tgt_net, device=device)
         loss_t.backward()
         optimizer.step()
+        buffer.update_priorities(batch_indices, sample_prios)
     writer.close()
