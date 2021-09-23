@@ -35,6 +35,10 @@ EPSILON_START = 1.0
 EPSILON_DECAY = 0.01
 STEP_COUNT = 2
 
+PRIOR_REPLAY_ALPHA = 0.6
+BETA_START = 0.4
+BETA_FRAMES = 100000
+
 
 Experience = collections.namedtuple('Experience', field_names=['state', 'action', 'reward', 'done', 'new_state'])
 
@@ -59,14 +63,18 @@ class ExperienceBuffer:
         self.buffer.append(experience)
         self.priorities.append(self.max_prio)
 
-    def sample(self, batch_size):
+    def sample(self, batch_size, beta = 0.4):
         probs = np.array(self.priorities, dtype=np.float32) ** self.prob_alpha
         probs /= probs.sum()
         
         indices = np.random.choice(len(self.buffer), batch_size, p=probs, replace=True)
+        
+        total = len(self.buffer)
+        weights = (total * probs[indices]) ** beta
+        
         states, actions, rewards, dones, next_states = zip(*[self.buffer[idx] for idx in indices])
         return np.array(states), np.array(actions), np.array(rewards, dtype=np.float32), \
-               np.array(dones, dtype=np.uint8), np.array(next_states), indices
+               np.array(dones, dtype=np.uint8), np.array(next_states), indices, weights
                
     def update_priorities(self, batch_indices, batch_priorities):
         for idx, prio in zip(batch_indices, batch_priorities):
@@ -132,12 +140,13 @@ class  Agent :
         return done_reward
 
 
-def calc_loss(states, actions, rewards, dones, next_states, net, tgt_net, device="cpu", double=True):
+def calc_loss(states, actions, rewards, dones, next_states, weights, net, tgt_net, device="cpu", double=True):
     states_v = torch.tensor(states).to(device)
     next_states_v = torch.tensor(next_states).to(device)
     actions_v = torch.tensor(actions).to(device)
     rewards_v = torch.tensor(rewards).to(device)
     done_mask = torch.ByteTensor(dones).to(device)
+    batch_weights_v = torch.tensor(weights).to(device)
     state_action_values = net(states_v).gather(1, actions_v.type(torch.int64).unsqueeze(-1)).squeeze(-1)
     if double:
         next_state_actions = net(next_states_v).max(1)[1]
@@ -147,14 +156,14 @@ def calc_loss(states, actions, rewards, dones, next_states, net, tgt_net, device
     next_state_values[done_mask] = 0.0
 
     expected_state_action_values = next_state_values.detach() * (GAMMA ** STEP_COUNT) + rewards_v
-    losses_v = (state_action_values - expected_state_action_values) ** 2
+    losses_v = batch_weights_v * (state_action_values - expected_state_action_values) ** 2
     
     return losses_v.mean(), (losses_v + 1e-5).data.cpu().numpy()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cuda", default=True, action="store_true", help="Enable cuda")
+    parser.add_argument("--cuda", default=False, action="store_true", help="Enable cuda")
     parser.add_argument("--env", default=DEFAULT_ENV_NAME,
                         help="Name of the environment, default=" + DEFAULT_ENV_NAME)
     parser.add_argument("--reward", type=float, default=MEAN_REWARD_BOUND,
@@ -184,6 +193,7 @@ if __name__ == "__main__":
         frame_idx += 1
         if epsilon > 0:
             epsilon -= EPSILON_DECAY
+        beta = min(1.0, BETA_START + frame_idx * (1.0 - BETA_START)/BETA_FRAMES)
         reward = agent.play_step(net, epsilon, device=device)
         
         if reward is not None:
@@ -219,8 +229,8 @@ if __name__ == "__main__":
             tgt_net.load_state_dict(net.state_dict())
 
         optimizer.zero_grad()
-        states, actions, rewards, dones, next_states, batch_indices  = buffer.sample(BATCH_SIZE)
-        loss_t, sample_prios = calc_loss(states, actions, rewards, dones, next_states, net, tgt_net, device=device)
+        states, actions, rewards, dones, next_states, batch_indices, weights  = buffer.sample(BATCH_SIZE, beta)
+        loss_t, sample_prios = calc_loss(states, actions, rewards, dones, next_states, weights, net, tgt_net, device=device)
         loss_t.backward()
         optimizer.step()
         buffer.update_priorities(batch_indices, sample_prios)

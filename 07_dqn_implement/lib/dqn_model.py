@@ -12,6 +12,12 @@ import torch.nn.functional as F
 
 import numpy as np
 
+class Mish(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x):
+        return x * torch.tanh(F.softplus(x))
 
 class NoisyLinear(nn.Linear):
     def __init__(self, in_features, out_features, sigma_init=0.017, bias=True):
@@ -134,25 +140,25 @@ class NoisyDuelingDQN(nn.Module):
 
         self.conv = nn.Sequential(
             nn.Conv2d(input_shape[0], 32, kernel_size=8, stride=4),
-            nn.ReLU(),
+            Mish(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
+            Mish(),
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU()
+            Mish()
         )
 
         conv_out_size = self._get_conv_out(input_shape)
 
         self.fc_adv = nn.Sequential(
-            NoisyLinear(conv_out_size, 512),
-            nn.ReLU(),
-            NoisyLinear(512, n_actions)
+            NoisyLinear(conv_out_size, 256),
+            Mish(),
+            NoisyLinear(256, n_actions)
         )
         
         self.fc_val = nn.Sequential(
-            NoisyLinear(conv_out_size, 512),
-            nn.ReLU(),
-            NoisyLinear(512, 1)
+            NoisyLinear(conv_out_size, 128),
+            Mish(),
+            NoisyLinear(128, 1)
         )
 
     def _get_conv_out(self, shape):
