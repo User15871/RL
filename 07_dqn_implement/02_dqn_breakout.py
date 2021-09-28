@@ -17,6 +17,7 @@ from save_gif import Gif
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import itertools
 
 from tensorboardX import SummaryWriter
 
@@ -31,8 +32,6 @@ LEARNING_RATE = 1e-4
 SYNC_TARGET_FRAMES = 1000
 REPLAY_START_SIZE = 100
 
-EPSILON_START = 1.0
-EPSILON_DECAY = 0.01
 STEP_COUNT = 2
 
 PRIOR_REPLAY_ALPHA = 0.6
@@ -56,6 +55,7 @@ class ExperienceBuffer:
     def __getitem__(self, i):
         return self.buffer[i]
     
+    
     def __reversed__(self):
         return reversed(self.buffer)
     
@@ -67,7 +67,7 @@ class ExperienceBuffer:
         probs = np.array(self.priorities, dtype=np.float32) ** self.prob_alpha
         probs /= probs.sum()
         
-        indices = np.random.choice(len(self.buffer), batch_size, p=probs, replace=True)
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs, replace=False)
         
         total = len(self.buffer)
         weights = (total * probs[indices]) ** beta
@@ -93,6 +93,7 @@ class  Agent :
         self.hist_buffer = ExperienceBuffer(steps_count)
         self.exp_buffer = exp_buffer
         self.gif = Gif(path = './breakout/')
+        self.max_reward = 1.0
         self._reset()
 
     def _reset(self):
@@ -117,9 +118,10 @@ class  Agent :
         self.gif.load_frame(self.env.render(mode="rgb_array"))
         # do step in the environment
         new_state, reward, is_done, _ = self.env.step(action)
+        self.max_reward = max(self.max_reward, reward)
         self.total_reward += reward
         if is_done and (reward == 0):
-            reward = -1
+            reward = -self.max_reward
             
         exp = Experience(self.state, action, reward, is_done, new_state)
         self.hist_buffer.append(exp)
@@ -133,6 +135,15 @@ class  Agent :
         self.exp_buffer.append(Experience(self.hist_buffer[0].state, self.hist_buffer[0].action, hist_reward, self.hist_buffer[-1].done, self.hist_buffer[-1].new_state))
             
         if is_done:
+            for end_buffer_step in range(1, len(self.hist_buffer)):
+                hist_reward = 0.0
+                for i, e in enumerate(reversed(self.hist_buffer)):
+                    if i == end_buffer_step:
+                        break
+                    hist_reward *= self.gamma
+                    hist_reward += e.reward
+                    
+                self.exp_buffer.append(Experience(self.hist_buffer[end_buffer_step].state, self.hist_buffer[end_buffer_step].action, hist_reward, self.hist_buffer[-1].done, self.hist_buffer[-1].new_state))
             if self.env.was_real_done:
                 done_reward = self.total_reward
                 self.gif.save_gif()
@@ -154,10 +165,11 @@ def calc_loss(states, actions, rewards, dones, next_states, weights, net, tgt_ne
     else:
         next_state_values = tgt_net(next_states_v).max(1)[0]
     next_state_values[done_mask] = 0.0
-
+    
     expected_state_action_values = next_state_values.detach() * (GAMMA ** STEP_COUNT) + rewards_v
     losses_v = batch_weights_v * (state_action_values - expected_state_action_values) ** 2
-    
+#    print("rewards_v:", rewards_v)
+#    print("expected_state_action_values:", expected_state_action_values)
     return losses_v.mean(), (losses_v + 1e-5).data.cpu().numpy()
 
 
@@ -180,7 +192,6 @@ if __name__ == "__main__":
 
     buffer = ExperienceBuffer(REPLAY_SIZE)
     agent = Agent(env, buffer, STEP_COUNT)
-    epsilon = EPSILON_START
 
     optimizer = optim.Adam(net.parameters(), lr=LEARNING_RATE)
     total_rewards = []
@@ -191,22 +202,18 @@ if __name__ == "__main__":
 
     while True:
         frame_idx += 1
-        if epsilon > 0:
-            epsilon -= EPSILON_DECAY
         beta = min(1.0, BETA_START + frame_idx * (1.0 - BETA_START)/BETA_FRAMES)
-        reward = agent.play_step(net, epsilon, device=device)
+        reward = agent.play_step(net, device=device)
         
         if reward is not None:
             total_rewards.append(reward)
             speed = (frame_idx - ts_frame) / (time.time() - ts)
             mean_reward = np.mean(total_rewards[-100:])
-            if reward == mean_reward:
-                epsilon += (frame_idx - ts_frame) * EPSILON_DECAY
             ts_frame = frame_idx
             ts = time.time()
             
-            print("%d: done %d games, mean reward %.3f, reward %.3f, eps %.2f, speed %.2f f/s, max_loss %.2f" % (
-                frame_idx, len(total_rewards), mean_reward, reward, epsilon,
+            print("%d: done %d games, mean reward %.3f, reward %.3f, speed %.2f f/s, max_loss %.2f" % (
+                frame_idx, len(total_rewards), mean_reward, reward,
                 speed, buffer.max_prio
             ))
             
