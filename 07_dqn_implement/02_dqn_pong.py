@@ -22,18 +22,18 @@ import itertools
 from tensorboardX import SummaryWriter
 
 
-DEFAULT_ENV_NAME = "BreakoutNoFrameskip-v4"
-MEAN_REWARD_BOUND = 100
+DEFAULT_ENV_NAME = "PongNoFrameskip-v4"
+MEAN_REWARD_BOUND = 19.5
 
 GAMMA = 0.99
 BATCH_SIZE = 32
 REPLAY_SIZE = 10000
 LEARNING_RATE = 1e-4
 SYNC_TARGET_FRAMES = 1000
-REPLAY_START_SIZE = 100
+REPLAY_START_SIZE = 10000
 
 EPSILON_DECAY_LAST_FRAME = 10**5
-EPSILON_START = 0.0
+EPSILON_START = 1.0
 EPSILON_FINAL = 0.0
 STEP_COUNT = 2
 
@@ -95,13 +95,11 @@ class  Agent :
         self.gamma = gamma
         self.hist_buffer = ExperienceBuffer(steps_count)
         self.exp_buffer = exp_buffer
-        self.gif = Gif(path = './breakout/')
-        self.max_reward = 1.0
+        self.gif = Gif(path = './pong/')
         self._reset()
 
     def _reset(self):
-        if self.env.was_real_done:
-            self.total_reward = 0.0
+        self.total_reward = 0.0
         self.state = env.reset()
         self.hist_buffer.clear()
 
@@ -121,10 +119,7 @@ class  Agent :
         self.gif.load_frame(self.env.render(mode="rgb_array"))
         # do step in the environment
         new_state, reward, is_done, _ = self.env.step(action)
-        self.max_reward = max(self.max_reward, reward)
         self.total_reward += reward
-        if is_done and (reward == 0):
-            reward = -self.max_reward
             
         exp = Experience(self.state, action, reward, is_done, new_state)
         self.hist_buffer.append(exp)
@@ -147,7 +142,6 @@ class  Agent :
                     hist_reward += e.reward
                     
                 self.exp_buffer.append(Experience(self.hist_buffer[end_buffer_step].state, self.hist_buffer[end_buffer_step].action, hist_reward, self.hist_buffer[-1].done, self.hist_buffer[-1].new_state))
-            if self.env.was_real_done:
                 done_reward = self.total_reward
                 self.gif.save_gif()
             self._reset()

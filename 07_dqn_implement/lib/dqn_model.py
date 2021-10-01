@@ -19,6 +19,23 @@ class Mish(nn.Module):
     def forward(self, x):
         return x * torch.tanh(F.softplus(x))
 
+class SELayer(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SELayer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            Mish(),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
 class NoisyLinear(nn.Linear):
     def __init__(self, in_features, out_features, sigma_init=0.017, bias=True):
         super(NoisyLinear, self).__init__(in_features, out_features, bias=bias)
@@ -108,11 +125,14 @@ class NoisyDQN(nn.Module):
 
         self.conv = nn.Sequential(
             nn.Conv2d(input_shape[0], 32, kernel_size=8, stride=4),
-            nn.ReLU(),
+            Mish(),
+            SELayer(32),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
-            nn.ReLU(),
+            Mish(),
+            SELayer(64),
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            nn.ReLU()
+            Mish(),
+            SELayer(64)
         )
 
         conv_out_size = self._get_conv_out(input_shape)
@@ -120,7 +140,7 @@ class NoisyDQN(nn.Module):
 
         self.fc = nn.Sequential(
             NoisyLinear(conv_out_size, 512),
-            nn.ReLU(),
+            Mish(),
             NoisyLinear(512, n_actions)
         )
 
@@ -141,10 +161,13 @@ class NoisyDuelingDQN(nn.Module):
         self.conv = nn.Sequential(
             nn.Conv2d(input_shape[0], 32, kernel_size=8, stride=4),
             Mish(),
+            SELayer(32),
             nn.Conv2d(32, 64, kernel_size=4, stride=2),
             Mish(),
+            SELayer(64),
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
-            Mish()
+            Mish(),
+            SELayer(64)
         )
 
         conv_out_size = self._get_conv_out(input_shape)
